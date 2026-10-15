@@ -2,3 +2,15 @@ wget https://repo.zabbix.com/zabbix/7.0/ubuntu/pool/main/z/zabbix-release/zabbix
 sudo dpkg -i zabbix-release_latest_7.0+ubuntu24.04_all.deb
 sudo apt update
 sudo apt install zabbix-agent2 zabbix-agent2-plugin-*
+
+Then edit /etc/zabbix/zabbix_agent2.conf:
+
+Server=<zabbix-lxc-ip>          # allows passive checks from the server
+ServerActive=<zabbix-lxc-ip>    # enables active checks + autoregistration
+Hostname=mint-vm101             # unique per VM
+HostMetadata=linux-lab          # matched by your autoregistration action
+
+Start the agent:
+
+bash
+sudo systemctl enable --now zabbix-agent2
