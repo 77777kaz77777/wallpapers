@@ -14,3 +14,13 @@ Start the agent:
 
 bash
 sudo systemctl enable --now zabbix-agent2
+
+
+
+ZABBIX_IP="192.168.77.170"
+sudo sed -i \
+  -e "s/^Server=.*/Server=$ZABBIX_IP/" \
+  -e "s/^ServerActive=.*/ServerActive=$ZABBIX_IP/" \
+  -e "s/^Hostname=.*/Hostname=mint-vm101/" \
+  -e "s/^[# ]*HostMetadata=.*/HostMetadata=linux-lab/" \
+  /etc/zabbix/zabbix_agent2.conf
