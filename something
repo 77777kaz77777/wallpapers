@@ -24,3 +24,8 @@ sudo sed -i \
   -e "s/^Hostname=.*/Hostname=mint-vm101/" \
   -e "s/^[# ]*HostMetadata=.*/HostMetadata=linux-lab/" \
   /etc/zabbix/zabbix_agent2.conf
+
+
+grep -E '^(Server|ServerActive|HostMetadata)=' /etc/zabbix/zabbix_agent2.conf
+nc -zv 192.168.77.170 10051
+sudo tail -20 /var/log/zabbix/zabbix_agent2.log
