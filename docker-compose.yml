@@ -22,8 +22,7 @@ services:
     user: root                      # lab only: needed to read the Docker socket
     environment:
       ZBX_HOSTNAME: docker-lab
-      ZBX_SERVER_HOST: ${ZABBIX_SERVER:-192.168.77.170}     # passive checks allowed from
-      ZBX_ACTIVESERVERS: ${ZABBIX_SERVER:-192.168.77.170}   # active checks + autoregistration
+      ZBX_SERVER_HOST: ${ZABBIX_SERVER:-192.168.77.170}     # sets both Server and ServerActive
       ZBX_METADATA: linux-lab docker
       ZBX_TIMEOUT: 10
     ports:
