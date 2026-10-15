@@ -43,3 +43,8 @@ sudo sed -i \
   -e "s/^Hostname=.*/Hostname=fedora-vm102/" \
   -e "s/^[# ]*HostMetadata=.*/HostMetadata=linux-lab/" \
   /etc/zabbix_agentd.conf
+
+
+
+sudo systemctl enable --now zabbix-agent
+sudo systemctl status zabbix-agent
