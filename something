@@ -34,3 +34,12 @@ sudo tail -20 /var/log/zabbix/zabbix_agent2.log
 sudo dnf install zabbix-agent
 dnf info zabbix-agent        # check the version
 rpm -qc zabbix-agent         # shows where the config file lives
+
+
+ZABBIX_IP="192.168.77.170"
+sudo sed -i \
+  -e "s/^Server=.*/Server=$ZABBIX_IP/" \
+  -e "s/^ServerActive=.*/ServerActive=$ZABBIX_IP/" \
+  -e "s/^Hostname=.*/Hostname=fedora-vm102/" \
+  -e "s/^[# ]*HostMetadata=.*/HostMetadata=linux-lab/" \
+  /etc/zabbix_agentd.conf
