@@ -41,7 +41,7 @@ mapfile -t NODES </etc/pve-lab-web/nodes
 while :; do
     clear
     for n in "${NODES[@]}"; do
-        ssh -t -o BatchMode=yes -o ConnectTimeout=4 "root@$n"
+        ssh -t -o BatchMode=yes -o ConnectTimeout=4 -o GSSAPIAuthentication=no -o AddressFamily=inet "root@$n"
         rc=$?
         ((rc != 255)) && break
         echo "Can't reach $n - trying the next node..."
