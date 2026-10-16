@@ -17,8 +17,15 @@ pass=0 fail=0
 ok()   { echo "  PASS  $*"; ((pass++)); }
 bad()  { echo "  FAIL  $*"; ((fail++)); }
 step() { echo; echo "=== $*"; echo "=== $*" >>"$OUT"; }
-lab()  { "$PVELAB" --yes "$@" >>"$OUT" 2>&1; }
-check_rc() { if (($1 == 0)); then ok "$2 (exit 0)"; else bad "$2 (exit $1, see $OUT)"; fi; }
+LAST=/tmp/lab-test.last
+lab()  { "$PVELAB" --yes "$@" >"$LAST" 2>&1; local rc=$?; cat "$LAST" >>"$OUT"; return $rc; }
+check_rc() {
+    if (($1 == 0)); then ok "$2 (exit 0)"; return; fi
+    bad "$2 (exit $1)"
+    # show why: the failed commands and their error lines
+    grep -E '^\s+\^ failed|^\[[0-9]+/[0-9]+\]|[Ee]rror|[Ff]ailed|unable|can.t|not ' "$LAST" |
+        grep -B1 -E '[Ee]rror|[Ff]ailed|unable|can.t|not ' | grep -v '^--$' | head -12 | sed 's/^/        /'
+}
 
 conf()    { compgen -G "/etc/pve/nodes/*/qemu-server/$1.conf" || compgen -G "/etc/pve/nodes/*/lxc/$1.conf"; }
 node_of() { conf "$1" | cut -d/ -f5; }
@@ -29,7 +36,7 @@ status()  {
         perl -MJSON::PP -e 'local $/; print decode_json(<STDIN>)->{status}' 2>/dev/null
 }
 has_snap() { grep -qxF "[$2]" "$(conf "$1")" 2>/dev/null; }
-desc_has() { awk '/^\[/ {exit} /^description:/' "$(conf "$1")" | grep -q "$2"; }
+desc_has() { awk '/^\[/ {exit} {print}' "$(conf "$1")" | grep -q "$2"; }   # PVE keeps it as "#..." lines
 on_node()  {   # on_node ID cmd...  (runs on the guest's node)
     local n; n=$(node_of "$1"); shift
     if [[ $n == "$ME" ]]; then "$@"; else ssh -n -o BatchMode=yes "root@$n" "$(printf '%q ' "$@")"; fi
