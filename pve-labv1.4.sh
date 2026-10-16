@@ -19,7 +19,7 @@
 #
 set -o pipefail
 
-VERSION="1.4"
+VERSION="1.5"
 PVE_ROOT=${PVE_ROOT:-/etc/pve}
 CONF_DIR=${PVE_LAB_CONF_DIR:-/etc/pve-lab}
 SETTINGS_FILE="$CONF_DIR/settings.conf"
@@ -76,14 +76,24 @@ in_ranges() {
 }
 NODES=()
 
+INV_OK=0
+INV_TTL=${INV_TTL:-15}   # seconds the inventory is reused before it is read again
+inventory_dirty() { INV_OK=0; }
+
 load_inventory() {
-    local json id type node status name tags
-    json=$(pvesh get /cluster/resources --type vm --output-format json 2>/dev/null) || {
+    # Reuse a fresh inventory - reading it costs a few pvesh calls (~1 s each)
+    if ((INV_OK && SECONDS - INV_AT < INV_TTL)); then return 0; fi
+    local tmp id type node status name tags n kind f
+    tmp=$(mktemp -d)
+    # One call returns the guests AND the nodes
+    if ! pvesh get /cluster/resources --output-format json >"$tmp/res" 2>/dev/null; then
+        rm -rf "$tmp"
         echo "Could not query the cluster (pvesh get /cluster/resources)." >&2
         return 1
-    }
-    G_TYPE=() G_NODE=() G_STATUS=() G_NAME=() G_TAGS=() GUEST_IDS=() PROTECTED_IDS=()
-    while IFS=$'\t' read -r id type node status name tags; do
+    fi
+    G_TYPE=() G_NODE=() G_STATUS=() G_NAME=() G_TAGS=() GUEST_IDS=() PROTECTED_IDS=() NODES=()
+    while IFS=$'\t' read -r kind id type node status name tags; do
+        if [[ $kind == N ]]; then NODES+=("$id"); continue; fi
         [[ $id =~ ^[0-9]+$ ]] || continue
         if [[ -n $PROTECTED ]] && in_ranges "$id" "$PROTECTED"; then
             PROTECTED_IDS+=("$id"$'\t'"$type"$'\t'"$node"$'\t'"$status"$'\t'"$name")
@@ -98,32 +108,33 @@ load_inventory() {
         G_TAGS[$id]=$tags
     done < <(perl -MJSON::PP -e '
         local $/; my $d = decode_json(<STDIN>);
-        for my $r (sort { $a->{vmid} <=> $b->{vmid} } @$d) {
+        print "N\t$_->{node}\n" for sort { $a->{node} cmp $b->{node} }
+            grep { $_->{type} eq "node" && ($_->{status} // "") eq "online" } @$d;
+        for my $r (sort { $a->{vmid} <=> $b->{vmid} } grep { $_->{type} =~ /^(qemu|lxc)$/ } @$d) {
             next if $r->{template};
             my $n = (defined $r->{name} && length $r->{name}) ? $r->{name} : "-";
             my $t = (defined $r->{tags} && length $r->{tags}) ? $r->{tags} : "-";
-            print join("\t", $r->{vmid}, $r->{type}, $r->{node}, $r->{status} // "unknown", $n, $t), "\n";
-        }' <<<"$json" 2>/dev/null)
-
-    NODES=()
-    json=$(pvesh get /nodes --output-format json 2>/dev/null) || json='[]'
-    mapfile -t NODES < <(perl -MJSON::PP -e '
-        local $/; my $d = decode_json(<STDIN>);
-        print "$_->{node}\n" for sort { $a->{node} cmp $b->{node} }
-                                grep { ($_->{status} // "") eq "online" } @$d' <<<"$json" 2>/dev/null)
+            print join("\t", "G", $r->{vmid}, $r->{type}, $r->{node}, $r->{status} // "unknown", $n, $t), "\n";
+        }' <"$tmp/res" 2>/dev/null)
     ((${#NODES[@]})) || NODES=("$LOCAL_NODE")
 
-    # /cluster/resources can lag ~10 s behind; ask each node for the live state
-    local n kind
+    # /cluster/resources can lag ~10 s behind; ask every node for the live state,
+    # all at the same time
     for n in "${NODES[@]}"; do
         for kind in qemu lxc; do
-            while IFS=$'\t' read -r id status; do
-                [[ -n $id && -n ${G_TYPE[$id]} ]] && G_STATUS[$id]=$status
-            done < <(pvesh get "/nodes/$n/$kind" --output-format json 2>/dev/null | perl -MJSON::PP -e '
-                local $/; my $d = decode_json(<STDIN>);
-                print "$_->{vmid}\t$_->{status}\n" for @$d' 2>/dev/null)
+            pvesh get "/nodes/$n/$kind" --output-format json >"$tmp/live.$n.$kind" 2>/dev/null &
         done
     done
+    wait
+    for f in "$tmp"/live.*; do
+        [[ -s $f ]] || continue
+        while IFS=$'\t' read -r id status; do
+            [[ -n $id && -n ${G_TYPE[$id]} ]] && G_STATUS[$id]=$status
+        done < <(perl -MJSON::PP -e 'local $/; my $d = decode_json(<STDIN>);
+            print "$_->{vmid}\t$_->{status}\n" for @$d' <"$f" 2>/dev/null)
+    done
+    rm -rf "$tmp"
+    INV_OK=1 INV_AT=$SECONDS
 }
 
 # node_bridges NODE [any_bridge|OVSBridge|bridge] -> "iface<TAB>type" lines
@@ -352,6 +363,7 @@ plan_run() {
     done
     bg_collect_all
     trap - INT
+    inventory_dirty
     local ok=$PLAN_OK
 
     echo
@@ -1321,6 +1333,7 @@ action_settings() {
                 v=$(ask "Settings" "VMIDs/ranges pve-lab must never touch (hidden from every list), e.g. 100-103. Empty = none:" "$PROTECTED") || continue
                 PROTECTED=$(trim "$v")
                 save_settings
+                inventory_dirty
                 load_inventory
                 ;;
             groups) edit_groups ;;
@@ -1337,6 +1350,7 @@ action_settings() {
 }
 
 action_inventory() {
+    inventory_dirty
     load_inventory || return
     local f
     f=$(mktemp)
