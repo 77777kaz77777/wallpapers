@@ -19,7 +19,7 @@
 #
 set -o pipefail
 
-VERSION="1.3"
+VERSION="1.4"
 PVE_ROOT=${PVE_ROOT:-/etc/pve}
 CONF_DIR=${PVE_LAB_CONF_DIR:-/etc/pve-lab}
 SETTINGS_FILE="$CONF_DIR/settings.conf"
@@ -112,6 +112,18 @@ load_inventory() {
         print "$_->{node}\n" for sort { $a->{node} cmp $b->{node} }
                                 grep { ($_->{status} // "") eq "online" } @$d' <<<"$json" 2>/dev/null)
     ((${#NODES[@]})) || NODES=("$LOCAL_NODE")
+
+    # /cluster/resources can lag ~10 s behind; ask each node for the live state
+    local n kind
+    for n in "${NODES[@]}"; do
+        for kind in qemu lxc; do
+            while IFS=$'\t' read -r id status; do
+                [[ -n $id && -n ${G_TYPE[$id]} ]] && G_STATUS[$id]=$status
+            done < <(pvesh get "/nodes/$n/$kind" --output-format json 2>/dev/null | perl -MJSON::PP -e '
+                local $/; my $d = decode_json(<STDIN>);
+                print "$_->{vmid}\t$_->{status}\n" for @$d' 2>/dev/null)
+        done
+    done
 }
 
 # node_bridges NODE [any_bridge|OVSBridge|bridge] -> "iface<TAB>type" lines
