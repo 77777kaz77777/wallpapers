@@ -68,6 +68,10 @@ list_join() { local IFS=,; echo "$*"; }
 
 [[ $EUID -eq 0 ]] || { echo "Run as root."; exit 1; }
 [[ -x $PVELAB ]] || { echo "Can't find $PVELAB (set PVELAB=/path/to/pve-lab.sh)"; exit 1; }
+v=$(grep -m1 '^VERSION=' "$PVELAB" | tr -dc '0-9.')
+if [[ $(printf '%s\n' "$v" 1.3 | sort -V | head -1) != 1.3 ]] || (($(grep -c '^cmd_start() {' "$PVELAB") != 1)); then
+    echo "$PVELAB is version ${v:-?} or a damaged copy - get pve-lab.sh 1.3 or newer first."; exit 1
+fi
 mapfile -t L < <(ids_of "$LOCAL_RANGE")
 mapfile -t R < <(ids_of "$REMOTE_RANGE")
 ((${#L[@]})) || { echo "No test guests in $LOCAL_RANGE - run lab-seed.sh first."; exit 1; }
@@ -123,7 +127,7 @@ expect stopped "${L[@]}"
 for id in "${L[@]}"; do has_snap "$id" T1 || bad "$id lost T1"; done
 
 step "8. RAM snapshot (9203 ClassStart): reset must stop it, start must not double-start"
-if [[ " ${L[*]} " == *" 9203 "* ]] && grep -A5 -xF '[ClassStart]' "$(conf 9203)" | grep -q '^vmstate:'; then
+if [[ " ${L[*]} " == *" 9203 "* ]] && awk '$0 == "[ClassStart]" {f = 1; next} /^\[/ {f = 0} f && /^vmstate:/ {x = 1} END {exit !x}' "$(conf 9203)"; then
     lab reset --snap ClassStart --only 9203 --hard
     check_rc $? "reset 9203 to RAM snapshot"
     expect stopped 9203
