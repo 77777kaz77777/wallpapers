@@ -33,71 +33,75 @@ sudo systemctl enable --now zabbix-agent
 sudo systemctl status zabbix-agent
 
 
-
-
-
-
 #!/usr/bin/env bash
 # lab-seed.sh - create a small fake lab to test pve-lab.sh in a nested cluster
-# Run on node 1 as root:   ./lab-seed.sh <node2-name>
+# Run on the FIRST node as root:   ./lab-seed.sh <other-node-name>
 # Guests have no OS (they just sit at the BIOS) - that's all pve-lab.sh needs.
+# Uses VMIDs 9101-9304, 501402 and 510400-510405; existing guests are never touched.
 set -e
-NODE2=${1:?usage: $0 <node2-name>}
 NODE1=$(hostname -s)
+NODE2=${1:?usage: $0 <other-node-name>   (run this on the first node)}
+[[ $NODE2 != "$NODE1" ]] || { echo "You are ON $NODE2. Run this on the other node and pass $NODE2."; exit 1; }
+ssh -o BatchMode=yes "root@$NODE2" true || { echo "Can't ssh to root@$NODE2 - is it in the cluster?"; exit 1; }
 STORE=local-lvm              # lvm-thin: snapshots work for VMs and containers
 
-mk() {   # mk VMID NAME [extra qm create options]
+exists() { compgen -G "/etc/pve/nodes/*/qemu-server/$1.conf" >/dev/null || compgen -G "/etc/pve/nodes/*/lxc/$1.conf" >/dev/null; }
+
+mk() {   # mk VMID NAME [extra qm create options]  - creates + snapshots ClassStart
     local id=$1 name=$2; shift 2
-    if qm status "$id" &>/dev/null; then echo "$id exists, skipping"; return; fi
+    if exists "$id"; then echo "VMID $id already used - skipping"; return 0; fi
     qm create "$id" --name "$name" --memory 256 --cores 1 --kvm 0 --ostype l26 \
         --scsihw virtio-scsi-single --scsi0 "$STORE:1" --net0 virtio,bridge=vmbr0 "$@"
+    [[ $NOSNAP == 1 ]] || qm snapshot "$id" ClassStart
 }
 
-echo "== Open vSwitch bridge vmbr2 on $NODE1"
-apt-get install -y openvswitch-switch
-ssh "root@$NODE2" apt-get install -y openvswitch-switch
-if ! grep -q '^iface vmbr2' /etc/network/interfaces; then
-    pvesh create "/nodes/$NODE1/network" --iface vmbr2 --type OVSBridge --autostart 1
-    pvesh set "/nodes/$NODE1/network"          # apply
-fi
+echo "== Open vSwitch bridge vmbr2 on both nodes"
+for n in "$NODE1" "$NODE2"; do
+    ssh "root@$n" "apt-get install -y openvswitch-switch >/dev/null && grep -q '^iface vmbr2' /etc/network/interfaces || {
+        pvesh create /nodes/$n/network --iface vmbr2 --type OVSBridge --autostart 1 && pvesh set /nodes/$n/network; }"
+done
 
 echo "== Extra dir storage for qcow2 conversion"
 pvesm status | grep -q '^lab-qcow2 ' || pvesm add dir lab-qcow2 --path /var/lib/lab-qcow2 --content images
 
-echo "== Containers"
-pveam update
+echo "== Containers on $NODE1"
+pveam update >/dev/null
 TMPL=$(pveam available --section system | awk '/debian-12-standard/ {print $2; exit}')
 [[ -f /var/lib/vz/template/cache/$TMPL ]] || pveam download local "$TMPL"
-for ct in "103 fileserver" "210 timeserver"; do
-    set -- $ct
-    pct status "$1" &>/dev/null || pct create "$1" "local:vztmpl/$TMPL" --hostname "$2" \
-        --memory 256 --rootfs "$STORE:1" --net0 name=eth0,bridge=vmbr0,ip=dhcp --unprivileged 1
-done
-pct snapshot 103 ClassStart || true                 # 210 deliberately has no snapshot
+if ! exists 9103; then
+    pct create 9103 "local:vztmpl/$TMPL" --hostname lab-fileserver --memory 256 --rootfs "$STORE:1" \
+        --net0 name=eth0,bridge=vmbr0,ip=dhcp --unprivileged 1
+    pct snapshot 9103 ClassStart
+fi
+exists 9210 || pct create 9210 "local:vztmpl/$TMPL" --hostname lab-timeserver --memory 256 --rootfs "$STORE:1" \
+    --net0 name=eth0,bridge=vmbr0,ip=dhcp --unprivileged 1      # deliberately no snapshot
 
 echo "== Lab-start guests on $NODE1"
-mk 102 kali
-mk 201 srv-01 --tags "lab;server"
-mk 202 srv-02 --tags "lab;server"
-mk 203 srv-03 --tags "lab;server"
-mk 207 tenable          --net1 virtio,bridge=vmbr2,firewall=0
+mk 9102 lab-kali
+mk 9201 lab-srv-01 --tags "lab;server"
+mk 9202 lab-srv-02 --tags "lab;server"
+NOSNAP=1 mk 9203 lab-srv-03 --tags "lab;server"
+if ! qm listsnapshot 9203 | grep -q ClassStart; then
+    qm start 9203 && qm snapshot 9203 ClassStart --vmstate 1     # RAM snapshot
+fi
+mk 9207 lab-tenable       --net1 virtio,bridge=vmbr2,firewall=0
 mk 501402 dragos-sensor-1 --net1 virtio,bridge=vmbr2,firewall=1
-for id in 102 201 202 207 501402; do qm snapshot "$id" ClassStart || true; done
-qm start 203 && qm snapshot 203 ClassStart --vmstate 1 || true   # RAM snapshot
 
 echo "== Guests on $NODE2 (remote commands)"
-for vm in "303 DMZ2-FS-03" "304 DMZ2-FS-04"; do
+for vm in "9303 lab-dmz2-fs-03" "9304 lab-dmz2-fs-04"; do
     set -- $vm
-    ssh "root@$NODE2" "qm status $1 &>/dev/null || { qm create $1 --name $2 --memory 256 --cores 1 --kvm 0 \
-        --scsihw virtio-scsi-single --scsi0 $STORE:1 --net0 virtio,bridge=vmbr0 && qm snapshot $1 ClassStart; }"
+    exists "$1" && { echo "VMID $1 already used - skipping"; continue; }
+    ssh "root@$NODE2" "qm create $1 --name $2 --memory 256 --cores 1 --kvm 0 --ostype l26 \
+        --scsihw virtio-scsi-single --scsi0 $STORE:1 --net0 virtio,bridge=vmbr0 && qm snapshot $1 ClassStart"
 done
 
 echo "== Prep-workflow VMs 510400-510405 (EFI, raw disks, no snapshots)"
 for i in 0 1 2 3 4 5; do
     keys=0; [[ $i == 0 ]] && keys=1                 # one already enrolled
-    mk "51040$i" "ent-client-0$i" --bios ovmf --machine q35 --tags lab \
+    NOSNAP=1 mk "51040$i" "lab-ent-client-0$i" --bios ovmf --machine q35 --tags lab \
         --efidisk0 "$STORE:1,efitype=4m,pre-enrolled-keys=$keys"
 done
 
 echo
 echo "Done. Next: ./pve-lab.sh  (turn on Dry-run in Settings for the first pass)"
+
