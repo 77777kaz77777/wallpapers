@@ -36,7 +36,10 @@ status()  {
         perl -MJSON::PP -e 'local $/; print decode_json(<STDIN>)->{status}' 2>/dev/null
 }
 has_snap() { grep -qxF "[$2]" "$(conf "$1")" 2>/dev/null; }
-desc_has() { awk '/^\[/ {exit} {print}' "$(conf "$1")" | grep -q "$2"; }   # PVE keeps it as "#..." lines
+# Rollback marker: "onboot: 1". (A description can't be used - Proxmox keeps the
+# current description on rollback.) Only valid for guests that had no onboot before.
+has_marker() { awk '/^\[/ {exit} {print}' "$(conf "$1")" | grep -qx 'onboot: 1'; }
+declare -A HAD_ONBOOT=()
 on_node()  {   # on_node ID cmd...  (runs on the guest's node)
     local n; n=$(node_of "$1"); shift
     if [[ $n == "$ME" ]]; then "$@"; else ssh -n -o BatchMode=yes "root@$n" "$(printf '%q ' "$@")"; fi
@@ -69,8 +72,8 @@ list_join() { local IFS=,; echo "$*"; }
 [[ $EUID -eq 0 ]] || { echo "Run as root."; exit 1; }
 [[ -x $PVELAB ]] || { echo "Can't find $PVELAB (set PVELAB=/path/to/pve-lab.sh)"; exit 1; }
 v=$(grep -m1 '^VERSION=' "$PVELAB" | tr -dc '0-9.')
-if [[ $(printf '%s\n' "$v" 1.3 | sort -V | head -1) != 1.3 ]] || (($(grep -c '^cmd_start() {' "$PVELAB") != 1)); then
-    echo "$PVELAB is version ${v:-?} or a damaged copy - get pve-lab.sh 1.3 or newer first."; exit 1
+if [[ $(printf '%s\n' "$v" 1.4 | sort -V | head -1) != 1.4 ]] || (($(grep -c '^cmd_start() {' "$PVELAB") != 1)); then
+    echo "$PVELAB is version ${v:-?} or a damaged copy - get pve-lab.sh 1.4 or newer first."; exit 1
 fi
 mapfile -t L < <(ids_of "$LOCAL_RANGE")
 mapfile -t R < <(ids_of "$REMOTE_RANGE")
@@ -101,13 +104,19 @@ check_rc $? "snapshot T1"
 for id in "${L[@]}"; do has_snap "$id" T1 && ok "$id has T1" || bad "$id has no T1"; done
 
 step "4. start with rollback to T1 (--keep ${L[0]} = not rolled back)"
-for id in "${L[@]}"; do on_node "$id" "$(gcmd "$id")" set "$id" --description marker-after-T1 >/dev/null; done
+for id in "${L[@]}"; do
+    awk '/^\[/ {exit} {print}' "$(conf "$id")" | grep -q '^onboot:' && { HAD_ONBOOT[$id]=1; continue; }
+    on_node "$id" "$(gcmd "$id")" set "$id" --onboot 1 >/dev/null
+done
 lab start --snap T1 --keep "${L[0]}" --only "$LS"
 check_rc $? "start --snap T1"
 expect running "${L[@]}"
-desc_has "${L[0]}" marker-after-T1 && ok "${L[0]} was kept (not rolled back)" || bad "${L[0]} was rolled back"
+if [[ -z ${HAD_ONBOOT[${L[0]}]} ]]; then
+    has_marker "${L[0]}" && ok "${L[0]} was kept (not rolled back)" || bad "${L[0]} was rolled back"
+fi
 for id in "${L[@]:1}"; do
-    desc_has "$id" marker-after-T1 && bad "$id was NOT rolled back" || ok "$id was rolled back"
+    [[ -n ${HAD_ONBOOT[$id]} ]] && { echo "  SKIP  $id already had onboot set - can't check"; continue; }
+    has_marker "$id" && bad "$id was NOT rolled back" || ok "$id was rolled back"
 done
 
 step "5. graceful shutdown (forced after ${TO}s)"
@@ -199,7 +208,7 @@ step "Cleanup"
 lab stop --only "$LS" --hard
 for id in "${L[@]}"; do
     for s in T3 T2 T1; do has_snap "$id" "$s" && on_node "$id" "$(gcmd "$id")" delsnapshot "$id" "$s" >>"$OUT" 2>&1; done
-    desc_has "$id" marker-after-T1 && on_node "$id" "$(gcmd "$id")" set "$id" --delete description >>"$OUT" 2>&1
+    [[ -z ${HAD_ONBOOT[$id]} ]] && has_marker "$id" && on_node "$id" "$(gcmd "$id")" set "$id" --delete onboot >>"$OUT" 2>&1
 done
 echo "  removed T1/T2/T3 and test markers"
 
