@@ -1,20 +1,3 @@
-wget https://repo.zabbix.com/zabbix/7.0/ubuntu/pool/main/z/zabbix-release/zabbix-release_latest_7.0+ubuntu24.04_all.deb
-sudo dpkg -i zabbix-release_latest_7.0+ubuntu24.04_all.deb
-sudo apt update
-sudo apt install zabbix-agent2 zabbix-agent2-plugin-*
-
-Then edit /etc/zabbix/zabbix_agent2.conf:
-
-Server=<zabbix-lxc-ip>          # allows passive checks from the server
-ServerActive=<zabbix-lxc-ip>    # enables active checks + autoregistration
-Hostname=mint-vm101             # unique per VM
-HostMetadata=linux-lab          # matched by your autoregistration action
-
-Start the agent:
-
-bash
-sudo systemctl enable --now zabbix-agent2
-
 
 
 ZABBIX_IP="192.168.77.170"
@@ -48,3 +31,73 @@ sudo sed -i \
 
 sudo systemctl enable --now zabbix-agent
 sudo systemctl status zabbix-agent
+
+
+
+
+
+
+#!/usr/bin/env bash
+# lab-seed.sh - create a small fake lab to test pve-lab.sh in a nested cluster
+# Run on node 1 as root:   ./lab-seed.sh <node2-name>
+# Guests have no OS (they just sit at the BIOS) - that's all pve-lab.sh needs.
+set -e
+NODE2=${1:?usage: $0 <node2-name>}
+NODE1=$(hostname -s)
+STORE=local-lvm              # lvm-thin: snapshots work for VMs and containers
+
+mk() {   # mk VMID NAME [extra qm create options]
+    local id=$1 name=$2; shift 2
+    if qm status "$id" &>/dev/null; then echo "$id exists, skipping"; return; fi
+    qm create "$id" --name "$name" --memory 256 --cores 1 --kvm 0 --ostype l26 \
+        --scsihw virtio-scsi-single --scsi0 "$STORE:1" --net0 virtio,bridge=vmbr0 "$@"
+}
+
+echo "== Open vSwitch bridge vmbr2 on $NODE1"
+apt-get install -y openvswitch-switch
+ssh "root@$NODE2" apt-get install -y openvswitch-switch
+if ! grep -q '^iface vmbr2' /etc/network/interfaces; then
+    pvesh create "/nodes/$NODE1/network" --iface vmbr2 --type OVSBridge --autostart 1
+    pvesh set "/nodes/$NODE1/network"          # apply
+fi
+
+echo "== Extra dir storage for qcow2 conversion"
+pvesm status | grep -q '^lab-qcow2 ' || pvesm add dir lab-qcow2 --path /var/lib/lab-qcow2 --content images
+
+echo "== Containers"
+pveam update
+TMPL=$(pveam available --section system | awk '/debian-12-standard/ {print $2; exit}')
+[[ -f /var/lib/vz/template/cache/$TMPL ]] || pveam download local "$TMPL"
+for ct in "103 fileserver" "210 timeserver"; do
+    set -- $ct
+    pct status "$1" &>/dev/null || pct create "$1" "local:vztmpl/$TMPL" --hostname "$2" \
+        --memory 256 --rootfs "$STORE:1" --net0 name=eth0,bridge=vmbr0,ip=dhcp --unprivileged 1
+done
+pct snapshot 103 ClassStart || true                 # 210 deliberately has no snapshot
+
+echo "== Lab-start guests on $NODE1"
+mk 102 kali
+mk 201 srv-01 --tags "lab;server"
+mk 202 srv-02 --tags "lab;server"
+mk 203 srv-03 --tags "lab;server"
+mk 207 tenable          --net1 virtio,bridge=vmbr2,firewall=0
+mk 501402 dragos-sensor-1 --net1 virtio,bridge=vmbr2,firewall=1
+for id in 102 201 202 207 501402; do qm snapshot "$id" ClassStart || true; done
+qm start 203 && qm snapshot 203 ClassStart --vmstate 1 || true   # RAM snapshot
+
+echo "== Guests on $NODE2 (remote commands)"
+for vm in "303 DMZ2-FS-03" "304 DMZ2-FS-04"; do
+    set -- $vm
+    ssh "root@$NODE2" "qm status $1 &>/dev/null || { qm create $1 --name $2 --memory 256 --cores 1 --kvm 0 \
+        --scsihw virtio-scsi-single --scsi0 $STORE:1 --net0 virtio,bridge=vmbr0 && qm snapshot $1 ClassStart; }"
+done
+
+echo "== Prep-workflow VMs 510400-510405 (EFI, raw disks, no snapshots)"
+for i in 0 1 2 3 4 5; do
+    keys=0; [[ $i == 0 ]] && keys=1                 # one already enrolled
+    mk "51040$i" "ent-client-0$i" --bios ovmf --machine q35 --tags lab \
+        --efidisk0 "$STORE:1,efitype=4m,pre-enrolled-keys=$keys"
+done
+
+echo
+echo "Done. Next: ./pve-lab.sh  (turn on Dry-run in Settings for the first pass)"
