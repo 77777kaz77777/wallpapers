@@ -19,7 +19,7 @@
 #
 set -o pipefail
 
-VERSION="1.7"
+VERSION="1.8"
 PVE_ROOT=${PVE_ROOT:-/etc/pve}
 CONF_DIR=${PVE_LAB_CONF_DIR:-/etc/pve-lab}
 SETTINGS_FILE="$CONF_DIR/settings.conf"
@@ -35,6 +35,7 @@ MAX_PARALLEL=8         # shutdowns running at the same time
 DEFAULT_SNAP="ClassStart"
 SENSOR_PATTERN='dragos|sensor|tenable|zeek|suricata|snort|onion|nsm'
 PROTECTED=""        # VMIDs/ranges pve-lab never touches, e.g. "100-103"
+THEME=midnight      # midnight | ocean | classic
 # shellcheck source=/dev/null
 [[ -r $SETTINGS_FILE ]] && . "$SETTINGS_FILE"
 
@@ -251,8 +252,14 @@ snap_has_vmstate() {
 
 guest_label() {
     local id=$1 t=""
-    [[ ${G_TYPE[$id]} == lxc ]] && t="CT "
-    printf '%-26.26s %-10.10s %s' "$t${G_NAME[$id]}" "${G_NODE[$id]}" "${G_STATUS[$id]}"
+    local st=${G_STATUS[$id]}
+    if ((UI_UTF8)); then
+        if [[ ${G_TYPE[$id]} == lxc ]]; then t="▣ "; else t="▢ "; fi
+        case $st in running) st="● running" ;; stopped) st="○ stopped" ;; *) st="? $st" ;; esac
+    else
+        [[ ${G_TYPE[$id]} == lxc ]] && t="CT "
+    fi
+    printf '%-26.26s %-10.10s %s' "$t${G_NAME[$id]}" "${G_NODE[$id]}" "$st"
 }
 
 # ids_in_ranges "510400-510430,102 300-399"  -> existing VMIDs inside those ranges
@@ -412,7 +419,8 @@ plan_run() {
         fi
     fi
 
-    echo "${C_B}== $title ==${C_0}"
+    if ((UI_UTF8)); then echo "${C_C}━━━━${C_0} ${C_B}$title${C_0} ${C_C}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C_0}"
+    else echo "${C_B}== $title ==${C_0}"; fi
     ((DRY_RUN)) && echo "${C_Y}DRY-RUN: nothing is being changed.${C_0}"
     log "== $title (dry-run=$DRY_RUN)"
     local e node cmd i=0 abort=0 bg out
@@ -464,7 +472,8 @@ plan_run() {
         printf '  - %s\n' "${PLAN_NOTES[@]}"
     fi
     if ((INTERACTIVE)); then
-        read -t "${PVE_LAB_IDLE:-86400}" -rp "Press Enter to return to the menu... " _ || : >"$IDLE_FLAG"
+        read -t "${PVE_LAB_IDLE:-86400}" -rp "Press Enter to return to the menu... " _ ||
+            { [[ -n $PVE_LAB_IDLE ]] && : >"$IDLE_FLAG"; }
         if ((${#FAILED[@]})); then
             ui_msg "${#FAILED[@]} command(s) failed (details in $LOG_FILE):"$'\n\n'"$(printf '%s\n' "${FAILED[@]}")" "$title"
         fi
@@ -483,8 +492,67 @@ term_size() {
     ((W > 150)) && W=150
     ((H < 15)) && H=15
     ((W < 60)) && W=60
-    LH=$((H - 8))
+    MW=$W
+    ((MW > 104)) && MW=104   # menus look better a bit narrower than the screen
 }
+# How many lines TEXT needs in a box WIDTH wide
+text_lines() {
+    local line n=0
+    while IFS= read -r line; do n=$((n + 1 + ${#line} / ($2 - 6))); done <<<"$1"
+    echo "$n"
+}
+# Box height that fits TEXT plus N list rows (never taller than the screen)
+fit_box() {   # text rows -> sets BOX_H BOX_LH
+    local tl
+    tl=$(text_lines "$1" "$MW")
+    BOX_LH=$2
+    ((BOX_LH > H - 7 - tl)) && BOX_LH=$((H - 7 - tl))
+    ((BOX_LH < 3)) && BOX_LH=3
+    BOX_H=$((BOX_LH + tl + 7))
+    ((BOX_H > H)) && BOX_H=$H
+}
+
+###############################################################################
+# Look & feel
+###############################################################################
+apply_theme() {
+    case $THEME in
+        midnight)
+            export NEWT_COLORS='
+                root=white,black          roottext=brightcyan,black   helpline=black,cyan
+                border=brightblue,gray    window=white,gray           shadow=black,black
+                title=brightcyan,gray     label=white,gray            textbox=white,gray
+                acttextbox=white,gray     listbox=white,gray          actlistbox=black,cyan
+                sellistbox=brightcyan,gray actsellistbox=black,cyan
+                checkbox=white,gray       actcheckbox=black,cyan
+                button=white,blue         actbutton=black,brightcyan  compactbutton=white,gray
+                entry=white,black         disentry=gray,gray
+                emptyscale=,black         fullscale=,cyan' ;;
+        ocean)
+            export NEWT_COLORS='
+                root=white,blue           roottext=yellow,blue        helpline=black,cyan
+                border=blue,lightgray     window=black,lightgray      shadow=black,black
+                title=blue,lightgray      label=black,lightgray       textbox=black,lightgray
+                acttextbox=black,lightgray listbox=black,lightgray    actlistbox=white,blue
+                sellistbox=blue,lightgray actsellistbox=white,blue
+                checkbox=black,lightgray  actcheckbox=white,blue
+                button=white,blue         actbutton=white,cyan        compactbutton=black,lightgray
+                entry=white,blue          disentry=gray,lightgray
+                emptyscale=,gray          fullscale=,blue' ;;
+        *) unset NEWT_COLORS ;;
+    esac
+}
+
+# Icons only when the terminal speaks UTF-8 (otherwise plain text)
+UI_UTF8=0
+setup_ui() {
+    if [[ $(locale charmap 2>/dev/null) != UTF-8 ]]; then
+        export LANG=C.UTF-8 LC_ALL=C.UTF-8
+    fi
+    [[ $(locale charmap 2>/dev/null) == UTF-8 ]] && UI_UTF8=1
+    apply_theme
+}
+ic() { if ((UI_UTF8)); then printf '%s  ' "$1"; fi; }
 
 # PVE_LAB_IDLE=<seconds>: close the menu after that long without a key press
 # (set by the pve-lab-web key; dialogs run in subshells, so a flag file carries it)
@@ -528,9 +596,16 @@ menu() {
     term_size
     local -a extra=()
     [[ -n $MENU_DEFAULT ]] && extra=(--default-item "$MENU_DEFAULT")
-    wt --title "$1" "${extra[@]}" --menu "$2" "$H" "$W" "$LH" "${@:3}"
+    fit_box "$2" $((($# - 2) / 2))
+    wt --title " $1 " "${extra[@]}" --ok-button "${OK_LABEL:-Select}" --cancel-button "${CANCEL_LABEL:-Back}" \
+        --menu "$2" "$BOX_H" "$MW" "$BOX_LH" "${@:3}"
 }
-checklist() { term_size; wt --title "$1" --separate-output --checklist "$2" "$H" "$W" "$LH" "${@:3}"; }
+checklist() {
+    term_size
+    fit_box "$2" $((($# - 2) / 3))
+    wt --title " $1 " --ok-button "OK" --cancel-button "Back" --separate-output \
+        --checklist "$2" "$BOX_H" "$MW" "$BOX_LH" "${@:3}"
+}
 textfile()  { term_size; wt --title "$1" --scrolltext --textbox "$2" "$H" "$W"; }
 
 choose_node() {
@@ -1373,8 +1448,8 @@ inventory_text() {
 
 save_settings() {
     mkdir -p "$CONF_DIR"
-    printf 'START_DELAY=%q\nSHUTDOWN_TIMEOUT=%q\nMAX_PARALLEL=%q\nDEFAULT_SNAP=%q\nSENSOR_PATTERN=%q\nPROTECTED=%q\n' \
-        "$START_DELAY" "$SHUTDOWN_TIMEOUT" "$MAX_PARALLEL" "$DEFAULT_SNAP" "$SENSOR_PATTERN" "$PROTECTED" >"$SETTINGS_FILE"
+    printf 'START_DELAY=%q\nSHUTDOWN_TIMEOUT=%q\nMAX_PARALLEL=%q\nDEFAULT_SNAP=%q\nSENSOR_PATTERN=%q\nPROTECTED=%q\nTHEME=%q\n' \
+        "$START_DELAY" "$SHUTDOWN_TIMEOUT" "$MAX_PARALLEL" "$DEFAULT_SNAP" "$SENSOR_PATTERN" "$PROTECTED" "$THEME" >"$SETTINGS_FILE"
 }
 
 edit_groups() {
@@ -1401,6 +1476,7 @@ action_settings() {
     local c v f
     while true; do
         c=$(menu "Settings" "" \
+            theme  "Colour theme: $THEME" \
             dry    "Dry-run mode: $( ((DRY_RUN)) && echo ON || echo OFF)  (show commands, change nothing)" \
             snap   "Default snapshot name: $DEFAULT_SNAP" \
             delay  "Delay between starts: ${START_DELAY}s" \
@@ -1412,6 +1488,15 @@ action_settings() {
             log    "View log ($LOG_FILE)" \
             back   "Back") || return
         case $c in
+            theme)
+                v=$(MENU_DEFAULT=$THEME menu "Settings" "Colour theme:" \
+                    midnight "Dark, cyan highlights (default)" \
+                    ocean    "Blue background, light windows" \
+                    classic  "Plain whiptail colours") || continue
+                THEME=$v
+                apply_theme
+                save_settings
+                ;;
             dry) DRY_RUN=$((1 - DRY_RUN)) ;;
             snap) v=$(ask "Settings" "Default snapshot name:" "$DEFAULT_SNAP") && [[ -n $v ]] && DEFAULT_SNAP=$v && save_settings ;;
             delay)
@@ -1469,24 +1554,33 @@ tui() {
         apt-get install -y whiptail || die "Could not install whiptail."
     fi
     INTERACTIVE=1
+    setup_ui
     rm -f "$IDLE_FLAG"
     trap 'rm -f "$IDLE_FLAG"' EXIT
     log "menu opened"
     load_inventory || die "Could not read the cluster inventory."
-    local c
+    local c id run head dot_on="*" dot_off="-"
+    ((UI_UTF8)) && dot_on="●" dot_off="○"
     while true; do
-        c=$(menu "Main menu" "${#GUEST_IDS[@]} guests on ${#NODES[@]} node(s) detected. What do you want to do?" \
-            1 "Show detected guests & snapshots" \
-            2 "Start / reset lab (roll back, then start or shut down)" \
-            3 "Shut down lab (VMs and containers)" \
-            4 "Port mirroring (OVS -> sensors)" \
-            5 "Snapshots (create / roll back / delete, with shutdown)" \
-            6 "Change network (bridge / VLAN / firewall / model)" \
-            7 "Move disks / convert format" \
-            8 "Enroll EFI keys" \
-            9 "Migrate guests between nodes" \
-            s "Settings" \
-            0 "Quit") || break
+        load_inventory || true
+        run=0
+        for id in "${GUEST_IDS[@]}"; do [[ ${G_STATUS[$id]} == running ]] && ((run++)); done
+        head="Node $LOCAL_NODE   |   ${#NODES[@]} node(s) online   |   ${#GUEST_IDS[@]} guests:"
+        head+="  $dot_on $run running   $dot_off $((${#GUEST_IDS[@]} - run)) stopped"
+        ((${#PROTECTED_IDS[@]})) && head+=$'\n'"${#PROTECTED_IDS[@]} protected guest(s) hidden"
+        ((DRY_RUN)) && head+=$'\n'"$(ic "⚠")DRY-RUN is ON - commands are only shown"
+        c=$(CANCEL_LABEL=Quit menu "pve-lab" "$head" \
+            1 "$(ic "≡")Overview - guests, nodes & snapshots" \
+            2 "$(ic "▶")Start / reset lab" \
+            3 "$(ic "■")Shut down lab" \
+            4 "$(ic "⇄")Port mirroring (OVS → sensors)" \
+            5 "$(ic "↺")Snapshots - create / roll back / delete" \
+            6 "$(ic "◈")Network - bridge / VLAN / firewall / model" \
+            7 "$(ic "▤")Disks - move & convert" \
+            8 "$(ic "◇")EFI keys" \
+            9 "$(ic "→")Migrate between nodes" \
+            s "$(ic "⚙")Settings" \
+            0 "$(ic "✕")Quit") || break
         case $c in
             1) action_inventory ;;
             2) action_start ;;
