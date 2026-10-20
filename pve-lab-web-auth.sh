@@ -125,21 +125,30 @@ MAX_FAIL=5        # wrong sign-ins ...
 LOCK_MIN=10       # ... within this many minutes lock everyone out for that long
 IDLE=300          # seconds without input before signing out
 say() { logger -t pve-lab-web -- "$*" 2>/dev/null; }
+A=$'\e[96m' B=$'\e[1;97m' D=$'\e[38;5;245m' R=$'\e[91m' G=$'\e[92m' Z=$'\e[0m'
+banner() {
+    clear
+    printf '\n\n'
+    printf '   %s╭──────────────────────────────────────────────╮%s\n' "$A" "$Z"
+    printf '   %s│%s   %s▲  pve-lab%s                                 %s│%s\n' "$A" "$Z" "$B" "$Z" "$A" "$Z"
+    printf '   %s│%s   %sProxmox lab control%s                        %s│%s\n' "$A" "$Z" "$D" "$Z" "$A" "$Z"
+    printf '   %s╰──────────────────────────────────────────────╯%s\n\n' "$A" "$Z"
+    printf '   %sSign in to continue. All sign-ins are logged.%s\n\n' "$D" "$Z"
+}
 recent_failures() {
     local cut=$(($(date +%s) - LOCK_MIN * 60))
     awk -v c="$cut" '$1 >= c' "$FAILS" 2>/dev/null | wc -l
 }
-clear
-printf '\n  pve-lab - sign in\n  ------------------\n\n'
+banner
 if (($(recent_failures) >= MAX_FAIL)); then
-    echo "  Too many wrong sign-ins. Try again in $LOCK_MIN minutes."
+    echo "   ${R}Too many wrong sign-ins. Try again in $LOCK_MIN minutes.${Z}"
     say "sign-in refused: locked out"
     sleep 10; exit 1
 fi
 ok=""
 for try in 1 2 3; do
-    read -t "$IDLE" -rp "  Login: " u || exit 0
-    read -t "$IDLE" -rsp "  Password: " p || exit 0; echo
+    read -t "$IDLE" -rp "   ${A}Login     ${Z} " u || exit 0
+    read -t "$IDLE" -rsp "   ${A}Password  ${Z} " p || exit 0; echo
     line=""
     [[ $u =~ ^[A-Za-z0-9_.-]{1,32}$ ]] && line=$(awk -F: -v u="$u" '$1 == u {print; exit}' "$USERS")
     IFS=: read -r _ hash secret <<<"$line"
@@ -148,7 +157,7 @@ for try in 1 2 3; do
     if [[ -n $line && $(printf '%s' "$p" | openssl passwd -6 -salt "$(cut -d'$' -f3 <<<"$hash")" -stdin) == "$hash" ]]; then
         good=1
         if [[ -n $secret ]]; then
-            read -t "$IDLE" -rp "  Code from your authenticator app: " code || exit 0
+            read -t "$IDLE" -rp "   ${A}2FA code  ${Z} " code || exit 0
             [[ $code =~ ^[0-9]{6}$ ]] && oathtool --totp -b -w 1 "$secret" "$code" >/dev/null 2>&1 || good=0
         fi
     fi
@@ -157,11 +166,12 @@ for try in 1 2 3; do
     date +%s >>"$FAILS"
     say "sign-in FAILED for '${u:0:32}' (try $try)"
     sleep 3
-    echo "  Wrong login."
-    if (($(recent_failures) >= MAX_FAIL)); then echo "  Locked for $LOCK_MIN minutes."; sleep 5; exit 1; fi
+    echo "   ${R}✕ Wrong login.${Z}"; echo
+    if (($(recent_failures) >= MAX_FAIL)); then echo "   ${R}Locked for $LOCK_MIN minutes.${Z}"; sleep 5; exit 1; fi
 done
 [[ -n $ok ]] || exit 1
 say "sign-in OK: $ok"
+echo; echo "   ${G}✔ Welcome, $ok${Z} - opening the menu..."; sleep 1
 
 mapfile -t NODES </etc/pve-lab-web/nodes
 while :; do
@@ -176,10 +186,10 @@ while :; do
     done
     ((rc == 255)) && echo "No Proxmox node reachable (${NODES[*]})."
     echo
-    read -t "$IDLE" -rp "Press Enter to open the pve-lab menu again (signs out after ${IDLE}s) " _ || break
+    read -t "$IDLE" -rp "   ${D}Press Enter to open the menu again (signs out after ${IDLE}s)${Z} " _ || break
 done
 say "signed out: $ok"
-echo; echo "Signed out. Reload the page to sign in again."
+banner; echo "   ${D}Signed out. Reload the page to sign in again.${Z}"
 EOF
 chmod 755 /usr/local/bin/pve-lab-web
 systemctl restart pve-lab-web
