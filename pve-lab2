@@ -19,7 +19,7 @@
 #
 set -o pipefail
 
-VERSION="1.6"
+VERSION="1.7"
 PVE_ROOT=${PVE_ROOT:-/etc/pve}
 CONF_DIR=${PVE_LAB_CONF_DIR:-/etc/pve-lab}
 SETTINGS_FILE="$CONF_DIR/settings.conf"
@@ -48,7 +48,10 @@ else
     C_R='' C_G='' C_Y='' C_C='' C_B='' C_0=''
 fi
 
-log() { printf '%s %s\n' "$(date '+%F %T')" "$*" >>"$LOG_FILE" 2>/dev/null; }
+# Web users are passed in by pve-lab-web (LC_PVELAB_USER) so the log shows who did what
+WEB_USER=${LC_PVELAB_USER:-}
+[[ $WEB_USER =~ ^[A-Za-z0-9_.-]{1,32}$ ]] || WEB_USER=""
+log() { printf '%s %s%s\n' "$(date '+%F %T')" "${WEB_USER:+[$WEB_USER] }" "$*" >>"$LOG_FILE" 2>/dev/null; }
 die() { echo "${C_R}error:${C_0} $*" >&2; exit 1; }
 trim() { local s=$1; s="${s#"${s%%[![:space:]]*}"}"; echo "${s%"${s##*[![:space:]]}"}"; }
 
@@ -461,7 +464,7 @@ plan_run() {
         printf '  - %s\n' "${PLAN_NOTES[@]}"
     fi
     if ((INTERACTIVE)); then
-        read -rp "Press Enter to return to the menu... " _
+        read -t "${PVE_LAB_IDLE:-86400}" -rp "Press Enter to return to the menu... " _ || : >"$IDLE_FLAG"
         if ((${#FAILED[@]})); then
             ui_msg "${#FAILED[@]} command(s) failed (details in $LOG_FILE):"$'\n\n'"$(printf '%s\n' "${FAILED[@]}")" "$title"
         fi
@@ -483,9 +486,25 @@ term_size() {
     LH=$((H - 8))
 }
 
+# PVE_LAB_IDLE=<seconds>: close the menu after that long without a key press
+# (set by the pve-lab-web key; dialogs run in subshells, so a flag file carries it)
+IDLE_FLAG="/tmp/.pve-lab-idle.$$"
 wt() {
-    local bt="pve-lab $VERSION  |  node: $LOCAL_NODE"
+    local bt="pve-lab $VERSION  |  node: $LOCAL_NODE" rc
+    [[ -n $WEB_USER ]] && bt+="  |  user: $WEB_USER"
     ((DRY_RUN)) && bt+="  |  DRY-RUN (nothing will be changed)"
+    [[ -e $IDLE_FLAG ]] && return 1
+    if [[ $PVE_LAB_IDLE =~ ^[1-9][0-9]*$ ]]; then
+        timeout --foreground "$PVE_LAB_IDLE" whiptail --backtitle "$bt" "$@" 3>&1 1>&2 2>&3
+        rc=$?
+        if ((rc == 124)); then
+            : >"$IDLE_FLAG"
+            stty sane 2>/dev/null
+            log "menu closed after ${PVE_LAB_IDLE}s idle"
+            return 1
+        fi
+        return $rc
+    fi
     whiptail --backtitle "$bt" "$@" 3>&1 1>&2 2>&3
 }
 
@@ -1450,6 +1469,9 @@ tui() {
         apt-get install -y whiptail || die "Could not install whiptail."
     fi
     INTERACTIVE=1
+    rm -f "$IDLE_FLAG"
+    trap 'rm -f "$IDLE_FLAG"' EXIT
+    log "menu opened"
     load_inventory || die "Could not read the cluster inventory."
     local c
     while true; do
@@ -1478,8 +1500,11 @@ tui() {
             s) action_settings ;;
             0) break ;;
         esac
+        [[ -e $IDLE_FLAG ]] && break
     done
     clear
+    if [[ -e $IDLE_FLAG ]]; then echo "Closed after ${PVE_LAB_IDLE}s without activity."; fi
+    log "menu closed"
 }
 
 ###############################################################################
