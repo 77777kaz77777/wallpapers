@@ -20,7 +20,7 @@
 #
 set -o pipefail
 
-VERSION="2.4"
+VERSION="2.4.2"
 PVE_ROOT=${PVE_ROOT:-/etc/pve}
 CONF_DIR=${PVE_RANGE_CONF_DIR:-/etc/pve-range}
 SETTINGS_FILE="$CONF_DIR/settings.conf"
@@ -1792,7 +1792,8 @@ action_guide() {
         else
             items+=(edit "$(ic "+")Write a guide for $folder (starts from a template)")
         fi
-        items+=(upload "$(ic "↑")Upload a guide from your computer (text file)"
+        items+=(paste  "$(ic "⎘")Paste a guide (copy the text, paste it here)"
+                upload "$(ic "↑")Upload a guide from your computer (text file)"
                 url    "$(ic "↓")Import a guide from a web address (GitHub / Gitea)")
         [[ -s $f ]] && items+=(download "$(ic "⇩")Download this guide to your computer" delete "$(ic "−")Delete it")
         items+=(other "$(ic "▸")Another folder's guide")
@@ -1804,6 +1805,12 @@ action_guide() {
                 edit_text_file "$f"
                 log "class guide for $folder edited"
                 save_changes "Class guide for $folder edited"
+                ;;
+            paste)
+                if paste_text "Paste a class guide for $folder"; then
+                    guide_from_file "$UPLOADED" "$folder" "Paste a class guide"
+                    rm -rf "${UPLOADED%/*}"
+                fi
                 ;;
             upload)
                 if browser_upload "Upload a class guide for $folder"; then
@@ -1998,6 +2005,7 @@ action_addons() {
         ((${#items[@]})) || items+=(none "(no add-ons in this folder yet)")
         if can_edit_addons; then
             items+=(new "$(ic "+")New add-on - write it here"
+                    paste "$(ic "⎘")Paste an add-on (copy the script, paste it here)"
                     upload "$(ic "↑")Upload an add-on from your computer"
                     url "$(ic "↓")Import an add-on from a web address (GitHub / Gitea)"
                     edit "$(ic "✎")Edit an add-on"
@@ -2015,6 +2023,12 @@ action_addons() {
                 addon_check "$f"
                 log "add-on ${f#"$ADDON_DIR"/} edited"
                 save_changes "Add-on ${f#"$ADDON_DIR"/} edited"
+                ;;
+            paste)
+                if paste_text "Paste an add-on"; then
+                    addon_from_file "$UPLOADED" "Paste an add-on"
+                    rm -rf "${UPLOADED%/*}"
+                fi
                 ;;
             upload)
                 if browser_upload "Upload an add-on"; then
@@ -2071,9 +2085,11 @@ browser_upload() {   # title -> sets UPLOADED to a temp file (caller removes its
     echo
     echo "  $1"
     echo "  A file picker opens in your browser - choose ONE file (max 1 MB)."
-    echo "  (If nothing opens, the web page needs the upload option - see the user guide.)"
     echo
-    (cd "$d" && timeout 300 rz -b -e -E -q) 2>/dev/null
+    echo "  Nothing opens?  Press Ctrl+C to cancel. The web page then needs its upload"
+    echo "  option (enableZmodem) - or use 'New add-on' and paste the text into the editor."
+    echo
+    (cd "$d" && timeout --foreground 120 rz -b -e -E -q) 2>/dev/null
     stty sane 2>/dev/null
     f=$(find "$d" -maxdepth 1 -type f | head -1)
     if [[ -z $f ]]; then
@@ -2084,6 +2100,30 @@ browser_upload() {   # title -> sets UPLOADED to a temp file (caller removes its
     if (($(stat -c %s "$f") > 1048576)); then
         rm -rf "$d"
         ui_msg "That file is bigger than 1 MB - scripts and guides should be small text files." "$1"
+        return 1
+    fi
+    UPLOADED=$f
+}
+
+paste_text() {   # title -> sets UPLOADED (works on the console and in the browser)
+    UPLOADED=""
+    local d f
+    d=$(mktemp -d)
+    f="$d/pasted.txt"
+    clear
+    echo
+    echo "  $1"
+    echo
+    echo "  1. Paste the text now   (browser: Ctrl+Shift+V or right-click -> Paste)"
+    echo "  2. Press Enter, then Ctrl+D to finish        (Ctrl+C cancels)"
+    echo "  -----------------------------------------------------------------"
+    if ! (trap 'exit 130' INT; cat >"$f"); then
+        rm -rf "$d"
+        return 1
+    fi
+    if [[ ! -s $f ]] || ! grep -q '[^[:space:]]' "$f"; then
+        rm -rf "$d"
+        ui_msg "Nothing was pasted." "$1"
         return 1
     fi
     UPLOADED=$f
@@ -2114,11 +2154,11 @@ browser_download() {   # file title
     clear
     echo
     echo "  Sending ${1##*/} to your browser ..."
-    sz -b -e -q "$1" 2>/dev/null
+    timeout --foreground 120 sz -b -e -q "$1" 2>/dev/null
     stty sane 2>/dev/null
 }
 
-clean_text() { sed 's/\r$//' "$1"; }   # Windows line endings -> Unix
+clean_text() { sed -e 's/\r$//' -e 's/\x1b\[20[01]~//g' "$1"; }   # Windows line endings, paste markers
 
 slugify() {
     local s=${1%.*}
