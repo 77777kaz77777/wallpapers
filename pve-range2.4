@@ -20,7 +20,7 @@
 #
 set -o pipefail
 
-VERSION="2.2"
+VERSION="2.4"
 PVE_ROOT=${PVE_ROOT:-/etc/pve}
 CONF_DIR=${PVE_RANGE_CONF_DIR:-/etc/pve-range}
 SETTINGS_FILE="$CONF_DIR/settings.conf"
@@ -1788,10 +1788,13 @@ action_guide() {
         f=$(guide_file "$folder")
         local -a items=()
         if [[ -s $f ]]; then
-            items+=(view "$(ic "≡")Read the guide for $folder" edit "$(ic "✎")Edit it" delete "$(ic "−")Delete it")
+            items+=(view "$(ic "≡")Read the guide for $folder" edit "$(ic "✎")Edit it")
         else
             items+=(edit "$(ic "+")Write a guide for $folder (starts from a template)")
         fi
+        items+=(upload "$(ic "↑")Upload a guide from your computer (text file)"
+                url    "$(ic "↓")Import a guide from a web address (GitHub / Gitea)")
+        [[ -s $f ]] && items+=(download "$(ic "⇩")Download this guide to your computer" delete "$(ic "−")Delete it")
         items+=(other "$(ic "▸")Another folder's guide")
         c=$(NOTAGS=1 menu "Class guide" "How the '$folder' class is run - steps, what to keep, which add-ons to use."$'\n'"Saved in $GUIDE_DIR (shared by all nodes)." "${items[@]}") || return
         case $c in
@@ -1800,8 +1803,27 @@ action_guide() {
                 [[ -s $f ]] || write_guide_template "$f" "$folder"
                 edit_text_file "$f"
                 log "class guide for $folder edited"
+                save_changes "Class guide for $folder edited"
                 ;;
-            delete) confirm "Class guide" "Delete the guide for $folder?" --defaultno && rm -f "$f" && log "class guide for $folder deleted" ;;
+            upload)
+                if browser_upload "Upload a class guide for $folder"; then
+                    guide_from_file "$UPLOADED" "$folder" "Upload a class guide"
+                    rm -rf "${UPLOADED%/*}"
+                fi
+                ;;
+            url)
+                if url_import "Import a class guide for $folder"; then
+                    guide_from_file "$UPLOADED" "$folder" "Import a class guide"
+                    rm -rf "${UPLOADED%/*}"
+                fi
+                ;;
+            download) browser_download "$f" "Download the class guide" ;;
+            delete)
+                if confirm "Class guide" "Delete the guide for $folder?" --defaultno && rm -f "$f"; then
+                    log "class guide for $folder deleted"
+                    save_changes "Class guide for $folder deleted"
+                fi
+                ;;
             other)
                 folder=$(choose_any_folder "Class guide" "$folder") || continue
                 [[ $folder == _all ]] && folder=all
@@ -1951,6 +1973,7 @@ EOF
     log "add-on $where/$slug.sh created"
     edit_text_file "$f"
     addon_check "$f"
+    save_changes "Add-on $where/$slug.sh created"
 }
 
 addon_move() {
@@ -1959,7 +1982,7 @@ addon_move() {
     to=$(choose_any_folder "Move an add-on" "_all") || return
     mkdir -p "$ADDON_DIR/$to"
     [[ -e $ADDON_DIR/$to/${f##*/} ]] && { ui_msg "$(folder_label "$to") already has ${f##*/}." "Move an add-on"; return; }
-    mv "$f" "$ADDON_DIR/$to/" && log "add-on ${f##*/} moved to $to" &&
+    mv "$f" "$ADDON_DIR/$to/" && log "add-on ${f##*/} moved to $to" && save_changes "Add-on ${f##*/} moved to $to" &&
         ui_msg "Moved - it now shows in: $(folder_label "$to")." "Move an add-on"
 }
 
@@ -1974,18 +1997,560 @@ action_addons() {
         done < <(addon_files)
         ((${#items[@]})) || items+=(none "(no add-ons in this folder yet)")
         if can_edit_addons; then
-            items+=(new "$(ic "+")New add-on" edit "$(ic "✎")Edit an add-on" move "$(ic "→")Move an add-on to another folder" delete "$(ic "−")Delete an add-on")
+            items+=(new "$(ic "+")New add-on - write it here"
+                    upload "$(ic "↑")Upload an add-on from your computer"
+                    url "$(ic "↓")Import an add-on from a web address (GitHub / Gitea)"
+                    edit "$(ic "✎")Edit an add-on"
+                    move "$(ic "→")Move an add-on to another folder"
+                    download "$(ic "⇩")Download an add-on to your computer"
+                    delete "$(ic "−")Delete an add-on")
         fi
         c=$(NOTAGS=1 menu "Add-ons - folder: ${FOLDER:-all}" "Your own scripts. Pick one to run it. [all folders] ones show everywhere.$(can_edit_addons || printf '\n(Creating and editing is switched off for web users - Settings on the node console.)')" "${items[@]}") || return
         case $c in
             run:*) run_addon "$ADDON_DIR/${c#run:}" ;;
             new) addon_new ;;
-            edit) f=$(pick_addon "Edit an add-on") && { edit_text_file "$f"; addon_check "$f"; log "add-on ${f#"$ADDON_DIR"/} edited"; } ;;
+            edit)
+                f=$(pick_addon "Edit an add-on") || continue
+                edit_text_file "$f"
+                addon_check "$f"
+                log "add-on ${f#"$ADDON_DIR"/} edited"
+                save_changes "Add-on ${f#"$ADDON_DIR"/} edited"
+                ;;
+            upload)
+                if browser_upload "Upload an add-on"; then
+                    addon_from_file "$UPLOADED" "Upload an add-on"
+                    rm -rf "${UPLOADED%/*}"
+                fi
+                ;;
+            url)
+                if url_import "Import an add-on"; then
+                    addon_from_file "$UPLOADED" "Import an add-on"
+                    rm -rf "${UPLOADED%/*}"
+                fi
+                ;;
             move) addon_move ;;
+            download) f=$(pick_addon "Download an add-on") && browser_download "$f" "Download an add-on" ;;
             delete)
                 f=$(pick_addon "Delete an add-on") || continue
-                confirm "Delete an add-on" "Delete ${f#"$ADDON_DIR"/}?" --defaultno && rm -f "$f" && log "add-on ${f#"$ADDON_DIR"/} deleted"
+                if confirm "Delete an add-on" "Delete ${f#"$ADDON_DIR"/}?" --defaultno && rm -f "$f"; then
+                    log "add-on ${f#"$ADDON_DIR"/} deleted"
+                    save_changes "Add-on ${f#"$ADDON_DIR"/} deleted"
+                fi
                 ;;
+        esac
+        [[ -e $IDLE_FLAG ]] && return
+    done
+}
+
+###############################################################################
+# Uploads from the browser, imports from a URL, downloads to the browser
+#   Upload/download use ZMODEM: the web menu (ttyd with enableZmodem) opens the
+#   browser's file picker when "rz" runs, and offers a download when "sz" runs.
+###############################################################################
+UPLOADED=""
+
+need_tool() {   # command package
+    command -v "$1" >/dev/null && return 0
+    confirm "Missing tool" "This needs '$1' (package $2) on $LOCAL_NODE. Install it now?" || return 1
+    clear
+    echo "Installing $2 ..."
+    apt-get install -y "$2" >/dev/null 2>&1 || { apt-get update >/dev/null 2>&1 && apt-get install -y "$2" >/dev/null 2>&1; }
+    command -v "$1" >/dev/null || { ui_msg "Could not install $2 (no internet on the node?)." "Missing tool"; return 1; }
+}
+
+browser_upload() {   # title -> sets UPLOADED to a temp file (caller removes its folder)
+    UPLOADED=""
+    if [[ -z $WEB_USER ]]; then
+        ui_msg "Uploading from your computer works in the web menu (browser)."$'\n\n'"On the console use 'Import from a URL', or create it in the editor and paste the text." "$1"
+        return 1
+    fi
+    need_tool rz lrzsz || return 1
+    local d f
+    d=$(mktemp -d)
+    clear
+    echo
+    echo "  $1"
+    echo "  A file picker opens in your browser - choose ONE file (max 1 MB)."
+    echo "  (If nothing opens, the web page needs the upload option - see the user guide.)"
+    echo
+    (cd "$d" && timeout 300 rz -b -e -E -q) 2>/dev/null
+    stty sane 2>/dev/null
+    f=$(find "$d" -maxdepth 1 -type f | head -1)
+    if [[ -z $f ]]; then
+        rm -rf "$d"
+        ui_msg "Nothing was uploaded." "$1"
+        return 1
+    fi
+    if (($(stat -c %s "$f") > 1048576)); then
+        rm -rf "$d"
+        ui_msg "That file is bigger than 1 MB - scripts and guides should be small text files." "$1"
+        return 1
+    fi
+    UPLOADED=$f
+}
+
+url_import() {   # title -> sets UPLOADED
+    UPLOADED=""
+    local url d f
+    url=$(ask "$1" "Address of the file (e.g. a 'raw' link from GitHub or Gitea):" "https://") || return 1
+    [[ $url =~ ^https?://[^[:space:]]+$ ]] || { ui_msg "That isn't a web address." "$1"; return 1; }
+    d=$(mktemp -d)
+    f="$d/${url##*/}"
+    [[ ${url##*/} =~ ^[A-Za-z0-9._-]+$ ]] || f="$d/imported.txt"
+    if ! curl -fsSL --max-time 30 --max-filesize 1048576 "$url" -o "$f" 2>"$d/.err"; then
+        ui_msg "Download failed:"$'\n\n'"$(cat "$d/.err")" "$1"
+        rm -rf "$d"
+        return 1
+    fi
+    UPLOADED=$f
+}
+
+browser_download() {   # file title
+    if [[ -z $WEB_USER ]]; then
+        ui_msg "Downloading to your computer works in the web menu."$'\n\n'"On the console the file is here: $1" "$2"
+        return
+    fi
+    need_tool sz lrzsz || return
+    clear
+    echo
+    echo "  Sending ${1##*/} to your browser ..."
+    sz -b -e -q "$1" 2>/dev/null
+    stty sane 2>/dev/null
+}
+
+clean_text() { sed 's/\r$//' "$1"; }   # Windows line endings -> Unix
+
+slugify() {
+    local s=${1%.*}
+    s=$(tr 'A-Z' 'a-z' <<<"$s" | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//' | cut -c1-40)
+    echo "${s:-my-addon}"
+}
+
+# Turn a received file into an add-on in a folder
+addon_from_file() {   # src title
+    local src=$1 title=$2 where slug name desc guests tmp dest err
+    tmp=$(mktemp)
+    clean_text "$src" >"$tmp"
+    where=${FOLDER:-all}
+    [[ $where == all ]] && where=_all
+    where=$(choose_any_folder "$title" "$where") || { rm -f "$tmp"; return 1; }
+    slug=$(ask "$title" "Save it as (small letters, digits and -):" "$(slugify "${src##*/}")") || { rm -f "$tmp"; return 1; }
+    [[ $slug =~ ^[a-z0-9][a-z0-9-]{0,40}$ ]] || { ui_msg "'$slug' isn't a valid name." "$title"; rm -f "$tmp"; return 1; }
+    mkdir -p "$ADDON_DIR/$where"
+    dest="$ADDON_DIR/$where/$slug.sh"
+    if [[ -e $dest ]] && ! confirm "$title" "$(folder_label "$where") already has $slug.sh. Replace it?" --defaultno; then
+        rm -f "$tmp"; return 1
+    fi
+    if ! grep -q '^# NAME:' "$tmp"; then
+        name=$(ask "$title" "Name shown in the menu:" "$slug") || { rm -f "$tmp"; return 1; }
+        desc=$(ask "$title" "One-line description:" "") || { rm -f "$tmp"; return 1; }
+        if confirm "$title" "Should it ask which guests to use first?"; then guests=yes; else guests=no; fi
+        {
+            echo "#!/usr/bin/env bash"
+            printf '# NAME:   %s\n# DESC:   %s\n# GUESTS: %s\n' "$name" "$desc" "$guests"
+            grep -v '^#!' "$tmp"
+        } >"$tmp.2" && mv "$tmp.2" "$tmp"
+    fi
+    if ! err=$(bash -n "$tmp" 2>&1); then
+        confirm "$title" "This script has a syntax error:"$'\n\n'"$err"$'\n\n'"Save it anyway (you can fix it with Edit)?" --defaultno || { rm -f "$tmp"; return 1; }
+    fi
+    cat "$tmp" >"$dest"
+    rm -f "$tmp"
+    log "add-on $where/$slug.sh added ($title)"
+    save_changes "Add-on $where/$slug.sh added"
+    ui_msg "Saved as $slug.sh in: $(folder_label "$where")." "$title"
+}
+
+guide_from_file() {   # src folder title
+    local f
+    f=$(guide_file "$2")
+    if [[ -s $f ]] && ! confirm "$3" "Replace the existing guide for $2?" --defaultno; then return 1; fi
+    clean_text "$1" >"$f.new" && cat "$f.new" >"$f"
+    rm -f "$f.new"
+    log "class guide for $2 replaced ($3)"
+    save_changes "Class guide for $2 replaced"
+    show_guide "$2"
+}
+
+###############################################################################
+# Saving: Git repository (GitHub / Gitea) and backups on a Proxmox storage
+#   Settings for both are shared: /etc/pve/pve-range/save.conf
+#   The repository token is kept in /etc/pve/priv (root only).
+###############################################################################
+REPO_DIR=/var/lib/pve-range/repo
+REPO_URL="" REPO_BRANCH=main REPO_USER="" AUTO_PUSH=1 BACKUP_STORAGE="" AUTO_BACKUP=1 BACKUP_KEEP=30
+
+save_conf()  { echo "$SHARE_DIR/save.conf"; }
+token_file() { echo "$PVE_ROOT/priv/pve-range-repo.token"; }
+
+load_save_conf() {
+    init_share
+    local k v
+    [[ -r $(save_conf) ]] || return 0
+    while IFS='=' read -r k v; do
+        case $k in
+            REPO_URL | REPO_BRANCH | REPO_USER | AUTO_PUSH | BACKUP_STORAGE | AUTO_BACKUP | BACKUP_KEEP) printf -v "$k" '%s' "$v" ;;
+        esac
+    done <"$(save_conf)"
+}
+write_save_conf() {
+    printf 'REPO_URL=%s\nREPO_BRANCH=%s\nREPO_USER=%s\nAUTO_PUSH=%s\nBACKUP_STORAGE=%s\nAUTO_BACKUP=%s\nBACKUP_KEEP=%s\n' \
+        "$REPO_URL" "$REPO_BRANCH" "$REPO_USER" "$AUTO_PUSH" "$BACKUP_STORAGE" "$AUTO_BACKUP" "$BACKUP_KEEP" >"$(save_conf)"
+}
+
+# git with the stored token (https) or this node's SSH key (git@...)
+rgit() {
+    local askpass rc
+    askpass=$(mktemp)
+    printf '#!/bin/sh\ncat %q 2>/dev/null\n' "$(token_file)" >"$askpass"
+    chmod 700 "$askpass"
+    GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=$askpass GIT_SSH_COMMAND="ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new" \
+        git -C "$REPO_DIR" "$@"
+    rc=$?
+    rm -f "$askpass"
+    return $rc
+}
+
+repo_remote_url() {   # https URLs get the user name in them, the token comes from askpass
+    if [[ $REPO_URL =~ ^(https?)://([^@/]+)(/.*)?$ && -n $REPO_USER ]]; then
+        echo "${BASH_REMATCH[1]}://$REPO_USER@${REPO_URL#*://}"
+    else
+        echo "$REPO_URL"
+    fi
+}
+
+repo_prepare() {
+    command -v git >/dev/null || return 1
+    if [[ ! -d $REPO_DIR/.git ]]; then
+        mkdir -p "$REPO_DIR"
+        git -C "$REPO_DIR" init -q -b "$REPO_BRANCH" 2>/dev/null || git -C "$REPO_DIR" init -q
+    fi
+    printf '.push-err\n.fetch-err\n' >"$REPO_DIR/.gitignore"
+    git -C "$REPO_DIR" config user.name "pve-range"
+    git -C "$REPO_DIR" config user.email "pve-range@$LOCAL_NODE"
+    if [[ -n $REPO_URL ]]; then
+        if git -C "$REPO_DIR" remote get-url origin >/dev/null 2>&1; then
+            git -C "$REPO_DIR" remote set-url origin "$(repo_remote_url)"
+        else
+            git -C "$REPO_DIR" remote add origin "$(repo_remote_url)"
+        fi
+    fi
+}
+
+# Everything users add, in the repository layout
+repo_export() {
+    local d=$REPO_DIR
+    rm -rf "$d/addons" "$d/guides" "$d/nodes/$LOCAL_NODE"
+    mkdir -p "$d/addons" "$d/guides" "$d/nodes/$LOCAL_NODE"
+    cp -r "$ADDON_DIR/." "$d/addons/" 2>/dev/null
+    cp -r "$GUIDE_DIR/." "$d/guides/" 2>/dev/null
+    for f in "$VMID_MAP" "$GROUPS_FILE" "$MIRRORS_FILE" "$SETTINGS_FILE"; do
+        [[ -f $f ]] && cp "$f" "$d/nodes/$LOCAL_NODE/"
+    done
+    [[ -f $d/README.md ]] || cat >"$d/README.md" <<'EOF'
+# pve-range content
+
+Saved automatically by pve-range.
+
+- `addons/_all/`      add-ons shown in every folder
+- `addons/<folder>/`  add-ons for one folder (class), e.g. 613, NetWars
+- `guides/<folder>.txt` class guides - how each class is run
+- `nodes/<node>/`     VMID map, saved groups, saved mirrors and settings of each node
+
+Edit files here and use "Get latest from the repository" in pve-range to load them.
+EOF
+}
+
+# Commit (and push when a repository is set up). Prints a short result.
+repo_save() {   # message
+    local msg=$1 author=${WEB_USER:-root@$LOCAL_NODE}
+    repo_prepare || { echo "git is not installed on $LOCAL_NODE"; return 1; }
+    if [[ -n $REPO_URL ]] && rgit ls-remote --exit-code origin "$REPO_BRANCH" >/dev/null 2>&1; then
+        rgit fetch -q origin "$REPO_BRANCH" 2>/dev/null
+        if ! git -C "$REPO_DIR" rev-parse -q --verify HEAD >/dev/null; then
+            rgit reset -q --hard "origin/$REPO_BRANCH"
+        elif ! git -C "$REPO_DIR" merge-base HEAD "origin/$REPO_BRANCH" >/dev/null 2>&1; then
+            # First save after connecting a repository that already has files:
+            # keep both histories; for files in both, what's on the cluster wins
+            rgit merge -q --allow-unrelated-histories -X ours -m "Connect $LOCAL_NODE to the repository" \
+                "origin/$REPO_BRANCH" >/dev/null 2>&1 || { rgit merge --abort >/dev/null 2>&1; rgit reset -q --hard "origin/$REPO_BRANCH"; }
+        elif ! rgit rebase -q "origin/$REPO_BRANCH" >/dev/null 2>&1; then
+            rgit rebase --abort >/dev/null 2>&1
+            rgit reset -q --hard "origin/$REPO_BRANCH"
+        fi
+    fi
+    repo_export
+    rgit add -A
+    if rgit diff --cached --quiet; then
+        echo "No changes to save."
+    else
+        rgit commit -q -m "$msg" --author "$author <$author@pve-range>" && echo "Saved locally: $msg"
+    fi
+    if [[ -n $REPO_URL ]]; then
+        if rgit push -q -u origin "HEAD:$REPO_BRANCH" 2>"$REPO_DIR/.push-err"; then
+            echo "Pushed to $REPO_URL ($REPO_BRANCH)."
+        else
+            echo "PUSH FAILED: $(tail -2 "$REPO_DIR/.push-err" | tr '\n' ' ')"
+            return 1
+        fi
+    fi
+}
+
+repo_get() {   # pull and load the repository's add-ons, guides and this node's files
+    repo_prepare || { ui_msg "git is not installed on $LOCAL_NODE." "Repository"; return 1; }
+    [[ -n $REPO_URL ]] || { ui_msg "No repository is connected yet - Save & share -> Connect GitHub / Gitea (any time)." "Repository"; return 1; }
+    if ! rgit fetch -q origin "$REPO_BRANCH" 2>"$REPO_DIR/.fetch-err"; then
+        ui_msg "Could not reach the repository:"$'\n\n'"$(cat "$REPO_DIR/.fetch-err")" "Repository"
+        return 1
+    fi
+    confirm "Get latest from the repository" "Replace the add-ons and class guides here with the ones in the repository ($REPO_BRANCH)?"$'\n\n'"Anything not saved to the repository yet is lost (a backup is made first if a backup storage is set)." --defaultno || return 1
+    [[ -n $BACKUP_STORAGE ]] && backup_now >/dev/null 2>&1
+    rgit reset -q --hard "origin/$REPO_BRANCH"
+    if [[ -d $REPO_DIR/addons ]]; then
+        rm -rf "${ADDON_DIR:?}"/*
+        cp -r "$REPO_DIR/addons/." "$ADDON_DIR/"
+        mkdir -p "$ADDON_DIR/_all"
+    fi
+    if [[ -d $REPO_DIR/guides ]]; then
+        rm -f "$GUIDE_DIR"/*
+        cp -r "$REPO_DIR/guides/." "$GUIDE_DIR/"
+    fi
+    [[ -f $REPO_DIR/nodes/$LOCAL_NODE/vmid-map.conf ]] && cp "$REPO_DIR/nodes/$LOCAL_NODE/vmid-map.conf" "$VMID_MAP" && load_vmid_map
+    [[ -f $REPO_DIR/nodes/$LOCAL_NODE/groups.conf ]] && cp "$REPO_DIR/nodes/$LOCAL_NODE/groups.conf" "$GROUPS_FILE"
+    log "loaded add-ons and guides from the repository ($(git -C "$REPO_DIR" log -1 --format=%h))"
+    ui_msg "Loaded version $(git -C "$REPO_DIR" log -1 --format='%h - %s (%an, %ad)' --date=format:'%Y-%m-%d %H:%M')." "Repository"
+}
+
+###############################################################################
+# Backups on a Proxmox storage (directory, NFS, CIFS ...)
+###############################################################################
+storage_path() {   # storage -> mount path
+    local p
+    p=$(awk -v s="$1" '/^[a-z0-9]+: / {id = $2; next} id == s && $1 == "path" {print $2; exit}' "$PVE_ROOT/storage.cfg" 2>/dev/null)
+    [[ -z $p && ${ST_TYPE[$1]} =~ ^(nfs|cifs|cephfs|glusterfs)$ ]] && p="/mnt/pve/$1"
+    echo "$p"
+}
+backup_dir() { local p; p=$(storage_path "$BACKUP_STORAGE"); [[ -n $p ]] && echo "$p/pve-range-backups"; }
+
+backup_now() {   # prints the file it wrote
+    load_storages
+    local d f
+    d=$(backup_dir) || return 1
+    [[ -n $d ]] || { echo "No backup storage set."; return 1; }
+    mkdir -p "$d" || { echo "Can't write to $d"; return 1; }
+    f="$d/pve-range-$LOCAL_NODE-$(date +%Y%m%d-%H%M%S).tar.gz"
+    local i=2
+    while [[ -e $f ]]; do f="$d/pve-range-$LOCAL_NODE-$(date +%Y%m%d-%H%M%S)-$i.tar.gz"; ((i++)); done
+    tar -czf "$f" -C / "${SHARE_DIR#/}" "${CONF_DIR#/}" 2>/dev/null || { echo "Backup failed"; return 1; }
+    ls -1t "$d"/pve-range-"$LOCAL_NODE"-*.tar.gz 2>/dev/null | tail -n +"$((BACKUP_KEEP + 1))" | xargs -r rm -f
+    echo "$f"
+}
+
+backup_restore() {
+    load_storages
+    local d f pick tmp
+    d=$(backup_dir)
+    [[ -n $d && -d $d ]] || { ui_msg "No backups yet (or no backup storage set)." "Restore a backup"; return; }
+    local -a items=()
+    while read -r f; do
+        items+=("${f##*/}" "$(date -r "$f" '+%Y-%m-%d %H:%M')  $(du -h "$f" | cut -f1)")
+    done < <(ls -1t "$d"/pve-range-*.tar.gz 2>/dev/null | head -40)
+    ((${#items[@]})) || { ui_msg "No backups found in $d." "Restore a backup"; return; }
+    pick=$(menu "Restore a backup" "Backups in $d (newest first):" "${items[@]}") || return
+    confirm "Restore a backup" "Put back the add-ons and class guides from $pick?"$'\n\n'"(This node's settings, groups and VMID map are restored too.)" --defaultno || return
+    tmp=$(mktemp -d)
+    tar -xzf "$d/$pick" -C "$tmp" || { ui_msg "Could not read $pick." "Restore a backup"; rm -rf "$tmp"; return; }
+    if [[ -d $tmp/${SHARE_DIR#/}/addons ]]; then
+        rm -rf "${ADDON_DIR:?}"/*
+        cp -r "$tmp/${SHARE_DIR#/}/addons/." "$ADDON_DIR/"
+        mkdir -p "$ADDON_DIR/_all"
+    fi
+    if [[ -d $tmp/${SHARE_DIR#/}/guides ]]; then
+        rm -f "$GUIDE_DIR"/*
+        cp -r "$tmp/${SHARE_DIR#/}/guides/." "$GUIDE_DIR/"
+    fi
+    for f in vmid-map.conf groups.conf mirrors.conf; do
+        [[ -f $tmp/${CONF_DIR#/}/$f ]] && cp "$tmp/${CONF_DIR#/}/$f" "$CONF_DIR/$f"
+    done
+    rm -rf "$tmp"
+    load_vmid_map
+    log "restored backup $pick"
+    save_changes "Restored backup $pick"
+    ui_msg "Restored from $pick." "Restore a backup"
+}
+
+# Called after every change users make
+save_changes() {   # message
+    load_save_conf
+    local out=""
+    if command -v git >/dev/null && { [[ -z $REPO_URL ]] || ((AUTO_PUSH)); }; then
+        out=$(repo_save "$1" 2>&1)
+        [[ $out == *"PUSH FAILED"* ]] && ui_msg "Saved here, but sending it to the repository failed:"$'\n\n'"$out" "Save & share"
+    fi
+    if [[ -n $BACKUP_STORAGE ]] && ((AUTO_BACKUP)); then backup_now >/dev/null 2>&1; fi
+    return 0
+}
+
+###############################################################################
+# Menu: Save & share
+###############################################################################
+repo_setup() {
+    local c v t
+    while true; do
+        load_save_conf
+        load_storages
+        local tok="not set"
+        [[ -s $(token_file) ]] && tok="set"
+        local -a ritems=()
+        if [[ -n $REPO_URL ]]; then
+            ritems=(url    "Repository address: $REPO_URL"
+                    branch "Branch: $REPO_BRANCH"
+                    user   "User name (GitHub/Gitea): ${REPO_USER:-none}"
+                    token  "Access token: $tok"
+                    autop  "Send every change to the repository: $( ((AUTO_PUSH)) && echo yes || echo no)"
+                    test   "Test the repository connection")
+        else
+            ritems=(connect "Repository: not connected - connect GitHub / Gitea")
+        fi
+        c=$(menu "Save & share - settings" "Where your add-ons, class guides and settings are saved." \
+            "${ritems[@]}" \
+            bstore  "Backup storage: ${BACKUP_STORAGE:-none}" \
+            autob   "Back up after every change: $( ((AUTO_BACKUP)) && echo yes || echo no)" \
+            keep    "Backups to keep: $BACKUP_KEEP" \
+            back    "Back") || return
+        case $c in
+            url)
+                v=$(ask "Repository" "Repository address - https://gitea.lab/team/pve-range.git, https://github.com/you/pve-range.git"$'\n'"or git@host:team/pve-range.git (uses the node's SSH key). Empty = no repository:" "$REPO_URL") || continue
+                REPO_URL=$(trim "$v") ;;
+            branch) v=$(ask "Repository" "Branch:" "$REPO_BRANCH") && [[ -n $v ]] && REPO_BRANCH=$v ;;
+            user) v=$(ask "Repository" "User name on GitHub / Gitea:" "$REPO_USER") && REPO_USER=$(trim "$v") ;;
+            token)
+                t=$(wt --title "Repository" --passwordbox "Access token (GitHub: fine-grained token with Contents read/write; Gitea: token with repository write). Empty = remove:" 11 "$MW") || continue
+                if [[ -n $t ]]; then printf '%s\n' "$t" >"$(token_file)"; else rm -f "$(token_file)"; fi
+                ;;
+            autop) AUTO_PUSH=$((1 - AUTO_PUSH)) ;;
+            connect) repo_connect; continue ;;
+            test)
+                need_tool git git || continue
+                repo_prepare
+                if [[ -z $REPO_URL ]]; then ui_msg "Set the repository address first." "Repository"
+                elif v=$(rgit ls-remote origin 2>&1); then ui_msg "Connection OK."$'\n\n'"$(head -5 <<<"$v")" "Repository"
+                else ui_msg "Connection failed:"$'\n\n'"$v" "Repository"; fi
+                continue ;;
+            bstore)
+                local -a items=(none "No backups")
+                local s
+                for s in $(printf '%s\n' "${!ST_TYPE[@]}" | sort); do
+                    [[ -n $(storage_path "$s") ]] && items+=("$s" "${ST_TYPE[$s]}  $(storage_path "$s")$(storage_is_shared "$s" && echo '  (shared)')")
+                done
+                v=$(MENU_DEFAULT=${BACKUP_STORAGE:-none} menu "Backup storage" "Where should backups go? A shared storage (NFS/CIFS) survives a node failure:" "${items[@]}") || continue
+                [[ $v == none ]] && v=""
+                BACKUP_STORAGE=$v ;;
+            autob) AUTO_BACKUP=$((1 - AUTO_BACKUP)) ;;
+            keep) v=$(ask "Backups" "How many backups to keep per node:" "$BACKUP_KEEP") && [[ $v =~ ^[1-9][0-9]*$ ]] && BACKUP_KEEP=$v ;;
+            back) return ;;
+        esac
+        write_save_conf
+    done
+}
+
+# Step by step: address -> user -> token -> test -> first save. Can be done any time.
+repo_connect() {
+    local t v out title="Connect a repository"
+    need_tool git git || return
+    load_save_conf
+    ui_msg "You can do this now or any time later - until then every change is still kept"$'\n'"in the history on this node and in backups (if a backup storage is set)."$'\n\n'"You need:"$'\n'"  1. an EMPTY repository on GitHub or Gitea (e.g. pve-range)"$'\n'"  2. an access token that may write to it"$'\n'"     GitHub: Settings -> Developer settings -> Fine-grained token -> Contents: read and write"$'\n'"     Gitea:  your user -> Settings -> Applications -> token with repository: read and write" "$title"
+    v=$(ask "$title" "Repository address, e.g."$'\n'"  https://github.com/you/pve-range.git"$'\n'"  http://192.168.77.91:3000/you/pve-range.git   (Gitea)"$'\n'"  git@host:team/pve-range.git                    (uses the node's SSH key)" "$REPO_URL") || return
+    v=$(trim "$v")
+    [[ $v =~ ^(https?://|git@|ssh://) ]] || { ui_msg "'$v' doesn't look like a repository address." "$title"; return; }
+    REPO_URL=$v
+    if [[ $REPO_URL =~ ^https?:// ]]; then
+        v=$(ask "$title" "Your user name on GitHub / Gitea:" "$REPO_USER") || return
+        REPO_USER=$(trim "$v")
+        t=$(wt --title "$title" --passwordbox "Access token (it is stored in /etc/pve/priv, root only):" 10 "$MW") || return
+        [[ -n $t ]] && printf '%s\n' "$t" >"$(token_file)"
+    fi
+    v=$(ask "$title" "Branch:" "$REPO_BRANCH") && [[ -n $v ]] && REPO_BRANCH=$v
+    write_save_conf
+    repo_prepare
+    clear
+    echo "Testing the connection to $REPO_URL ..."
+    if ! out=$(rgit ls-remote origin 2>&1); then
+        ui_msg "Can't connect yet:"$'\n\n'"$out"$'\n\n'"The details are saved - fix them under 'Change repository settings' and test again. Nothing is lost meanwhile." "$title"
+        return
+    fi
+    if confirm "$title" "Connected."$'\n\n'"Send everything saved so far (add-ons, class guides, settings and their history) to the repository now?"; then
+        out=$(repo_save "Connected $LOCAL_NODE to the repository" 2>&1)
+        ui_msg "$out" "$title"
+    fi
+    AUTO_PUSH=1
+    write_save_conf
+}
+
+repo_disconnect() {
+    load_save_conf
+    confirm "Disconnect the repository" "Stop sending changes to $REPO_URL?"$'\n\n'"Nothing is deleted - the repository keeps what it has, and this node keeps its history. You can connect again any time." --defaultno || return
+    REPO_URL="" REPO_USER=""
+    rm -f "$(token_file)"
+    write_save_conf
+    [[ -d $REPO_DIR/.git ]] && git -C "$REPO_DIR" remote remove origin 2>/dev/null
+    log "repository disconnected"
+}
+
+action_save() {
+    local c out f
+    init_share
+    while true; do
+        load_save_conf
+        local -a items=()
+        local head
+        if [[ -n $REPO_URL ]]; then
+            head="Repository: $REPO_URL ($REPO_BRANCH) - changes are sent $( ((AUTO_PUSH)) && echo automatically || echo 'only with Save now')"
+            items+=(save "$(ic "↑")Save to the repository now"
+                    get  "$(ic "↓")Get latest from the repository")
+        else
+            head="Repository: not connected (optional - connect it any time)"
+            items+=(connect "$(ic "+")Connect GitHub / Gitea - now or later")
+        fi
+        head+=$'\n'"Backups: ${BACKUP_STORAGE:-none}   |   History on this node: $(command -v git >/dev/null && echo on || echo 'off (git not installed)')"
+        items+=(hist    "$(ic "≡")History - who changed what"
+                backup  "$(ic "▤")Back up to the storage now"
+                restore "$(ic "↺")Restore a backup"
+                setup   "$(ic "⚙")Settings - backups$([[ -n $REPO_URL ]] && echo ', repository')")
+        [[ -n $REPO_URL ]] && items+=(disconnect "$(ic "−")Disconnect the repository")
+        c=$(NOTAGS=1 menu "Save & share" "$head" "${items[@]}") || return
+        case $c in
+            connect) repo_connect ;;
+            disconnect) repo_disconnect ;;
+            save)
+                need_tool git git || continue
+                clear
+                echo "Saving ..."
+                out=$(repo_save "Saved from the menu by ${WEB_USER:-root}" 2>&1)
+                ui_msg "$out" "Save to the repository"
+                ;;
+            get) need_tool git git && repo_get ;;
+            hist)
+                if ! command -v git >/dev/null; then
+                    need_tool git git && repo_save "History started" >/dev/null 2>&1
+                    continue
+                fi
+                if [[ ! -d $REPO_DIR/.git ]] || ! git -C "$REPO_DIR" rev-parse -q --verify HEAD >/dev/null; then
+                    repo_save "History started" >/dev/null 2>&1
+                fi
+                f=$(mktemp)
+                git -C "$REPO_DIR" log -60 --date=format:'%Y-%m-%d %H:%M' --format='%h  %ad  %-14an %s' --stat=80 >"$f" 2>&1
+                textfile "History" "$f"
+                rm -f "$f"
+                ;;
+            backup)
+                load_storages
+                if [[ -z $BACKUP_STORAGE ]]; then ui_msg "Choose a backup storage first (Settings)." "Backup"; continue; fi
+                out=$(backup_now 2>&1)
+                ui_msg "Backup written:"$'\n\n'"$out" "Backup"
+                ;;
+            restore) backup_restore ;;
+            setup) repo_setup ;;
         esac
         [[ -e $IDLE_FLAG ]] && return
     done
@@ -2111,12 +2676,13 @@ action_settings() {
                 inventory_dirty
                 load_inventory
                 ;;
-            groups) edit_groups ;;
+            groups) edit_groups; save_changes "Saved groups edited on $LOCAL_NODE" ;;
             askf) ASK_FOLDER=$((1 - ASK_FOLDER)); save_settings ;;
             showg) SHOW_GUIDE=$((1 - SHOW_GUIDE)); save_settings ;;
             vmap)
                 edit_text_file "$VMID_MAP"
                 load_vmid_map
+                save_changes "VMID map edited on $LOCAL_NODE"
                 inventory_dirty
                 ;;
             addweb)
@@ -2201,6 +2767,16 @@ PICKING GUESTS
   By VMID range, by class & sub-group (from the VMID), by name, by tag, by
   node, from a saved group, or tick them from a list. You always get a final
   list to untick guests before anything runs.
+
+SAVE & SHARE
+  Every change to add-ons, class guides, the VMID map and groups is saved:
+  - in a Git history on the node (who changed what - Save & share -> History)
+  - to your GitHub / Gitea repository, once you connect one (any time later)
+  - as a backup file on a Proxmox storage, if one is chosen (kept: 30)
+  "Get latest from the repository" loads what others pushed; "Restore a
+  backup" brings back an older state.
+  Upload / download in the web menu: Add-ons and Class guide have "Upload
+  from your computer" and "Download" - a file picker opens in the browser.
 
 SAFETY
   - Every action shows the exact commands and asks before running them.
@@ -2288,6 +2864,7 @@ tui() {
             _5 "$(sep_item "General")" \
             overview     "$(mi "≡" "Overview" "guests, nodes and snapshots in this folder")" \
             folder       "$(mi "▸" "Switch folder" "now: ${FOLDER:-all}")" \
+            save         "$(mi "↑" "Save & share" "repository (GitHub / Gitea), backups, history")" \
             settings     "$(mi "⚙" "Settings" "dry-run, protected guests, theme ...")" \
             help         "$(mi "?" "Help" "user guide")" \
             quit         "$(mi "✕" "Quit" "")") || break
@@ -2314,6 +2891,7 @@ tui() {
             addons) action_addons ;;
             overview) action_inventory ;;
             folder) choose_folder ;;
+            save) action_save ;;
             settings) action_settings ;;
             help) action_help ;;
             quit) break ;;
@@ -2339,6 +2917,8 @@ Usage: $0 [--dry-run] [--yes] [--protect RANGES] [--folder NAME] [COMMAND [optio
   storage               Storages, disk formats and every disk with its size
   help-guide            Print the user guide
   guide --folder NAME   Print the class guide of a folder (how that class is run)
+  save ["message"]      Save add-ons, guides and settings to the repository (Git)
+  backup                Back up add-ons, guides and settings to the backup storage
 
   class-start           Restore the class snapshot, then power on       (old name: start)
   class-end             Restore the class snapshot, then power off      (old name: reset)
@@ -2518,6 +3098,16 @@ main() {
         "") tui ;;
         list) load_inventory || exit 1; inventory_text ;;
         help-guide) help_text ;;
+        save)
+            load_vmid_map; init_share; load_save_conf
+            command -v git >/dev/null || die "git is not installed (apt-get install git)"
+            repo_save "${1:-Saved from the command line}"
+            ;;
+        backup)
+            init_share; load_save_conf
+            [[ -n $BACKUP_STORAGE ]] || die "No backup storage set (menu: Save & share -> Settings)"
+            backup_now
+            ;;
         guide)
             init_share
             if [[ -s $(guide_file "${FOLDER:-all}") ]]; then cat "$(guide_file "${FOLDER:-all}")"
